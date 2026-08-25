@@ -52,7 +52,7 @@ static constexpr char saved_i2p_peer_list_file_name[] = "p2pool_i2p_peers.txt";
 // "host" (default p2p port) or "host:port". The kth VPS publishes its p2pool
 // p2p on external port 20211, so new nodes auto-discover the network without
 // needing --addpeers.
-static const char* seed_nodes[] = { "deploy.cloud.cbh.kth.se:20211", "" };
+static const char* seed_nodes[] = { "deploy.cloud.cbh.kth.se:20211", "209.38.232.36:37889", "92.34.6.2:37889", "" };
 static const char* seed_nodes_mini[] = { "" };
 static const char* seed_nodes_nano[] = { "" };
 
