@@ -2,7 +2,7 @@ name: C/C++ CI
 
 on:
   push:
-    branches: ["master", "kryptokrona", "lenient-bans"]
+    branches: ["master"]
     tags: ["v*"]
     paths-ignore:
       - 'docker-compose/**'
@@ -30,15 +30,20 @@ jobs:
     # setup-alpine downloads apk.static from gitlab.alpinelinux.org by default,
     # which is frequently unreachable from GitHub's Azure runners (curl connect
     # timeout) and fails the whole job. Pre-fetch apk.static from the Alpine CDN
-    # (always reachable; it's apk-tools-static, the same binary, matching the
-    # rootfs branch's own apk) into $RUNNER_TEMP/apk. setup-alpine's download_file()
+    # (always reachable) into $RUNNER_TEMP/apk. setup-alpine's download_file()
     # sees an existing file whose sha256 matches apk-tools-url and skips its own
     # flaky download entirely.
+    #
+    # apk.static ALWAYS has to be the x86_64 (host) binary, even for the aarch64
+    # matrix entry: the action runs it ON THE RUNNER to build the rootfs and to
+    # fetch the qemu-<arch> emulator (apk itself cross-fetches other arches via
+    # --arch). Fetching the aarch64 apk.static here made the amd64 host choke with
+    # "cannot execute binary file: Exec format error".
     - name: Prefetch apk.static from Alpine CDN (avoid flaky gitlab.alpinelinux.org)
       shell: bash
       run: |
         set -euo pipefail
-        ARCH='${{ matrix.config.arch }}'
+        ARCH='x86_64'
         BASE="https://dl-cdn.alpinelinux.org/alpine/${{ matrix.config.branch }}/main/$ARCH"
         FILE=$(curl -fsSL --retry 6 --retry-all-errors "$BASE/" | grep -oE 'apk-tools-static-[0-9][^"]*\.apk' | sort -V | tail -1)
         curl -fsSL --retry 6 --retry-all-errors -o "$RUNNER_TEMP/pkg.apk" "$BASE/$FILE"
