@@ -2340,6 +2340,18 @@ void p2pool::reconnect_to_host()
 	}
 
 #ifndef P2POOL_UNIT_TESTS
+	// If check_host() flagged the RPC as wedged (no fresh data for a long time),
+	// break the overlap guard here: clear the stuck pending state so the
+	// get_miner_data() below is actually issued on a brand-new curl connection
+	// instead of being suppressed by an orphaned request that never completes.
+	// (The orphaned request, if any, still cleans itself up when its own timeout
+	// finally fires; we don't wait for it.)
+	if (m_rpcForceReconnect.exchange(false)) {
+		LOGWARN(1, "RPC has been unresponsive for too long; forcing a hard reconnect to " << current_host().m_displayName);
+		m_getMinerDataPending = false;
+		m_getMinerDataPendingSince = 0;
+	}
+
 	// The node is driven by polling kryptokronad for fresh miner data.
 	// get_miner_data() is deduplicated (by response hash) and self-guarded
 	// against overlap, and its handler refreshes m_lastActive, which serves as
