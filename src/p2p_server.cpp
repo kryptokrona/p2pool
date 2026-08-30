@@ -2664,9 +2664,18 @@ void P2PServer::P2PClient::on_disconnected()
 	m_pingTime = -1;
 
 	if (!m_handshakeComplete) {
-		LOGWARN(5, "peer " << static_cast<char*>(m_addrString) << " disconnected before finishing handshake");
+		// A connection that drops before the handshake finishes is almost always
+		// transient on a small mesh, not abuse: the remote reset us (ECONNRESET),
+		// a simultaneous inbound/outbound connect got de-duplicated ("already
+		// connected as ..."), the seed was momentarily full, a NAT mapping
+		// blinked, etc. The challenge/response handshake is itself the gate
+		// against junk peers, so there is nothing to protect against yet here.
+		// Banning on this was making nodes permanently blacklist their own seed
+		// nodes (every retry raced/reset the same way and re-armed the ban),
+		// which fractured the mesh into isolated single-node chains. Just drop
+		// it from the candidate list; it is retried on the next connect cycle.
+		LOGWARN(5, "peer " << static_cast<char*>(m_addrString) << " disconnected before finishing handshake (not banning)");
 
-		ban(DEFAULT_BAN_TIME);
 		if (server) {
 			server->remove_peer_from_list(this);
 		}
