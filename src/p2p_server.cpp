@@ -57,7 +57,19 @@ static const char* seed_nodes_mini[] = { "" };
 static const char* seed_nodes_nano[] = { "" };
 
 static constexpr int DEFAULT_BACKLOG = 16;
-static constexpr uint64_t DEFAULT_BAN_TIME = 600;
+// Keep bans short: peering matters more than abuse-protection for the XKR
+// sidechain right now. A node that restarts and re-syncs from a low sidechain
+// height temporarily can't verify honest peers' valid blocks (its own mainchain
+// view is still catching up), so it must not lock them out for long. 60s lets
+// the network re-mesh within a minute instead of 10.
+static constexpr uint64_t DEFAULT_BAN_TIME = 60;
+// Number of unacceptable blocks a peer may send before it is actually banned.
+// Block-verification failures are usually transient during sync (a peer's valid
+// block we can't verify yet), not abuse, so tolerate several before banning.
+static constexpr uint32_t BAN_FAULT_THRESHOLD = 5;
+// Force a hard RPC reconnect if no fresh miner data has arrived for this long. A
+// healthy poll refreshes it every ~2s, so 60s unambiguously means the RPC wedged.
+static constexpr uint64_t RPC_HARD_RECONNECT_TIMEOUT = 60;
 static constexpr uint64_t PEER_REQUEST_DELAY = 60;
 static constexpr uint64_t MAX_PENDING_BLOCK_REQUESTS = 25;
 static constexpr uint64_t MAX_PENDING_MONERO_BLOCK_BROADCASTS = 60;
@@ -1699,10 +1711,19 @@ void P2PServer::check_host()
 	LOGINFO(6, "polling daemon for new miner data");
 	m_pool->reconnect_to_host();
 
-	// If no fresh data has arrived from the node in 5 minutes, it's probably
-	// stuck or unreachable.
+	// A healthy poll refreshes m_lastActive roughly every couple of seconds, so a
+	// long gap means the RPC is wedged (an orphaned request whose curl socket poll
+	// died and never times out). The in-flight overlap guard often can't recover
+	// from this on its own, so force a hard reconnect: reconnect_to_host() will
+	// clear the stuck pending flag and issue a fresh request on a new connection.
 	const uint64_t cur_time = seconds_since_epoch();
 	const uint64_t last_active = m_pool->last_active();
+	if (last_active && (cur_time >= last_active + RPC_HARD_RECONNECT_TIMEOUT)) {
+		m_pool->request_rpc_reconnect();
+	}
+
+	// If no fresh data has arrived from the node in 5 minutes, it's probably
+	// stuck or unreachable.
 	if (last_active && (cur_time >= last_active + 300)) {
 		const uint64_t dt = static_cast<uint64_t>(cur_time - last_active);
 		const Params::Host& host = m_pool->current_host();
@@ -2180,6 +2201,7 @@ void P2PServer::P2PClient::reset()
 	m_connectedTime = 0;
 	m_connectedDomain = false;
 	m_broadcastMaxHeight = 0;
+	m_banScore = 0;
 	m_expectedMessage = MessageId::HANDSHAKE_CHALLENGE;
 	m_handshakeChallenge = 0;
 	m_handshakeSolutionSent = false;
@@ -3945,16 +3967,27 @@ void P2PServer::monero_block_broadcast_after_work_cb(uv_work_t* req, int /*statu
 	else if (work->pow_check_failed && !server->is_banned(work->is_v6, work->addr)) {
 		P2PClient* client = work->client;
 
-		if (!client->is_gone(work->reset_counter)) {
-			client->close();
-			LOGWARN(3, "peer " << static_cast<const char*>(client->m_addrString) << " banned for " << DEFAULT_BAN_TIME << " seconds");
+		const bool client_here = !client->is_gone(work->reset_counter);
+
+		// Same leniency as sidechain blocks: a failed PoW check on a broadcast
+		// mainchain block can be transient during sync, so tolerate a few per
+		// connection before banning (and only briefly).
+		if (client_here && (++client->m_banScore < BAN_FAULT_THRESHOLD)) {
+			LOGWARN(5, "peer " << static_cast<const char*>(client->m_addrString) << " failed a PoW check ("
+				<< client->m_banScore << '/' << BAN_FAULT_THRESHOLD << "), not banning yet");
 		}
 		else {
-			LOGWARN(3, work->addr << " banned for " << DEFAULT_BAN_TIME << " seconds");
-		}
+			if (client_here) {
+				client->close();
+				LOGWARN(3, "peer " << static_cast<const char*>(client->m_addrString) << " banned for " << DEFAULT_BAN_TIME << " seconds");
+			}
+			else {
+				LOGWARN(3, work->addr << " banned for " << DEFAULT_BAN_TIME << " seconds");
+			}
 
-		server->ban(work->is_v6, work->addr, DEFAULT_BAN_TIME);
-		server->remove_peer_from_list(work->addr);
+			server->ban(work->is_v6, work->addr, DEFAULT_BAN_TIME);
+			server->remove_peer_from_list(work->addr);
+		}
 	}
 
 	delete work;
@@ -4128,7 +4161,19 @@ void P2PServer::P2PClient::post_handle_incoming_block(p2pool* pool, const PoolBl
 	const bool gone = is_gone(reset_counter);
 
 	if (!result) {
-		// Client sent bad data, disconnect and ban it
+		// The block wasn't accepted. This is often transient rather than abuse:
+		// while we're re-syncing the sidechain (e.g. right after a restart) our
+		// mainchain view can lag, so an honest peer's perfectly valid block fails
+		// verification here. Tolerate several such blocks per connection before
+		// banning, and even then only briefly (DEFAULT_BAN_TIME) — keeping the
+		// network meshed matters more than punishing a peer immediately.
+		if (!gone && (++m_banScore < BAN_FAULT_THRESHOLD)) {
+			LOGWARN(5, "peer " << static_cast<char*>(m_addrString) << " sent an unacceptable block ("
+				<< m_banScore << '/' << BAN_FAULT_THRESHOLD << "), not banning yet");
+			return;
+		}
+
+		// Repeatedly bad — disconnect and (briefly) ban it
 		if (!gone) {
 			close();
 			LOGWARN(3, "peer " << static_cast<char*>(m_addrString) << " banned for " << DEFAULT_BAN_TIME << " seconds");
