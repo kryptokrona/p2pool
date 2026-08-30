@@ -1747,6 +1747,15 @@ void p2pool::parse_get_miner_data_rpc(const char* data, size_t size)
 		return;
 	}
 
+	// We only reach here on a non-empty, error-free RPC response, so the node is
+	// responsive right now -- record liveness BEFORE the duplicate-response
+	// short-circuit below. Between main-chain blocks (XKR ~90s) get_miner_data
+	// keeps returning byte-identical data that gets deduplicated, but the RPC is
+	// perfectly alive; updating m_lastActive only in handle_miner_data (new data
+	// only) made check_host falsely flag the node "unresponsive" in the gap
+	// between blocks and force needless reconnects (and spam the log).
+	m_lastActive = seconds_since_epoch();
+
 	hash h;
 	keccak(reinterpret_cast<const uint8_t*>(data), static_cast<int>(size), h.h);
 	if (h == m_getMinerDataHash) {
