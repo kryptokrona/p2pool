@@ -568,9 +568,14 @@ bool SideChain::add_external_block(PoolBlock& block, std::vector<hash>& missing_
 	}
 
 	if (!m_pool->get_seed(block.m_txinGenHeight, block.m_seed)) {
-		LOGWARN(3, "add_external_block mined by " << block.m_minerWallet << ": couldn't get seed hash for mainchain height " << block.m_txinGenHeight);
+		// We simply can't verify this block yet (our mainchain view for this
+		// height isn't available — common right after a restart while we're still
+		// catching up). This is not the peer's fault, so ignore the block instead
+		// of returning false, which would ban an honest peer. Mirrors the
+		// "couldn't get PoW hash" case just below.
+		LOGWARN(3, "add_external_block mined by " << block.m_minerWallet << ": couldn't get seed hash for mainchain height " << block.m_txinGenHeight << ". Ignoring it.");
 		forget_incoming_block(block);
-		return false;
+		return true;
 	}
 
 	if (!block.get_pow_hash(m_pool->hasher(), block.m_txinGenHeight, block.m_seed, block.m_powHash, false, RandomX_Hasher_Base::VM_LANE_P2P)) {

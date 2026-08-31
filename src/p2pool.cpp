@@ -1747,6 +1747,15 @@ void p2pool::parse_get_miner_data_rpc(const char* data, size_t size)
 		return;
 	}
 
+	// We only reach here on a non-empty, error-free RPC response, so the node is
+	// responsive right now -- record liveness BEFORE the duplicate-response
+	// short-circuit below. Between main-chain blocks (XKR ~90s) get_miner_data
+	// keeps returning byte-identical data that gets deduplicated, but the RPC is
+	// perfectly alive; updating m_lastActive only in handle_miner_data (new data
+	// only) made check_host falsely flag the node "unresponsive" in the gap
+	// between blocks and force needless reconnects (and spam the log).
+	m_lastActive = seconds_since_epoch();
+
 	hash h;
 	keccak(reinterpret_cast<const uint8_t*>(data), static_cast<int>(size), h.h);
 	if (h == m_getMinerDataHash) {
@@ -2340,6 +2349,18 @@ void p2pool::reconnect_to_host()
 	}
 
 #ifndef P2POOL_UNIT_TESTS
+	// If check_host() flagged the RPC as wedged (no fresh data for a long time),
+	// break the overlap guard here: clear the stuck pending state so the
+	// get_miner_data() below is actually issued on a brand-new curl connection
+	// instead of being suppressed by an orphaned request that never completes.
+	// (The orphaned request, if any, still cleans itself up when its own timeout
+	// finally fires; we don't wait for it.)
+	if (m_rpcForceReconnect.exchange(false)) {
+		LOGWARN(1, "RPC has been unresponsive for too long; forcing a hard reconnect to " << current_host().m_displayName);
+		m_getMinerDataPending = false;
+		m_getMinerDataPendingSince = 0;
+	}
+
 	// The node is driven by polling kryptokronad for fresh miner data.
 	// get_miner_data() is deduplicated (by response hash) and self-guarded
 	// against overlap, and its handler refreshes m_lastActive, which serves as

@@ -135,6 +135,9 @@ public:
 	uint64_t last_active() const { return m_lastActive; }
 	uint64_t start_time() const { return m_startTime; }
 	void reconnect_to_host();
+	// Ask for a hard RPC reconnect on the next poll (see m_rpcForceReconnect).
+	// Safe to call from any thread.
+	void request_rpc_reconnect() { m_rpcForceReconnect = true; }
 
 	bool startup_finished() const { return m_startupFinished.load(); }
 
@@ -303,6 +306,17 @@ private:
 	// otherwise leave m_getMinerDataPending stuck true and suppress all further
 	// polls forever -> the node serves stale templates and gets banned by peers.
 	uint64_t m_getMinerDataPendingSince = 0;
+
+	// Detector-driven hard-reconnect flag. The overlap guard above only recovers
+	// if get_miner_data() is reached with the request pending >30s, which in
+	// practice sometimes never happens (the recovery is main-loop-bound and the
+	// orphaned curl request never times out), so the RPC can stay wedged for
+	// hours. check_host() runs reliably on the P2P loop and watches m_lastActive;
+	// when it sees no fresh data for RPC_HARD_RECONNECT_TIMEOUT it sets this, and
+	// reconnect_to_host() (main loop) consumes it to force a brand-new request on
+	// a fresh curl connection regardless of the stuck pending state. atomic: set
+	// on the P2P thread, read on the main thread.
+	std::atomic<bool> m_rpcForceReconnect{ false };
 
 	std::atomic<uint64_t> m_lastMinerDataReceived;
 

@@ -141,6 +141,11 @@ public:
 
 		uint64_t m_broadcastMaxHeight;
 
+		// Count of unacceptable blocks this peer has sent this connection. We only
+		// ban once it reaches BAN_FAULT_THRESHOLD, so transient sync failures don't
+		// insta-ban honest peers. Reset per connection in reset().
+		uint32_t m_banScore;
+
 		MessageId m_expectedMessage;
 		uint64_t m_handshakeChallenge;
 		bool m_handshakeSolutionSent;

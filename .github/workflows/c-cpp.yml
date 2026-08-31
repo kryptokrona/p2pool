@@ -2,7 +2,7 @@ name: C/C++ CI
 
 on:
   push:
-    branches: ["master", "kryptokrona"]
+    branches: ["master"]
     tags: ["v*"]
     paths-ignore:
       - 'docker-compose/**'
@@ -20,17 +20,43 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         config:
           - {arch: x86_64, branch: latest-stable, flags: "-ffunction-sections"}
           - {arch: aarch64, branch: latest-stable, flags: "-ffunction-sections -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"}
 
     steps:
+    # setup-alpine downloads apk.static from gitlab.alpinelinux.org by default,
+    # which is frequently unreachable from GitHub's Azure runners (curl connect
+    # timeout) and fails the whole job. Pre-fetch apk.static from the Alpine CDN
+    # (always reachable) into $RUNNER_TEMP/apk. setup-alpine's download_file()
+    # sees an existing file whose sha256 matches apk-tools-url and skips its own
+    # flaky download entirely.
+    #
+    # apk.static ALWAYS has to be the x86_64 (host) binary, even for the aarch64
+    # matrix entry: the action runs it ON THE RUNNER to build the rootfs and to
+    # fetch the qemu-<arch> emulator (apk itself cross-fetches other arches via
+    # --arch). Fetching the aarch64 apk.static here made the amd64 host choke with
+    # "cannot execute binary file: Exec format error".
+    - name: Prefetch apk.static from Alpine CDN (avoid flaky gitlab.alpinelinux.org)
+      shell: bash
+      run: |
+        set -euo pipefail
+        ARCH='x86_64'
+        BASE="https://dl-cdn.alpinelinux.org/alpine/${{ matrix.config.branch }}/main/$ARCH"
+        FILE=$(curl -fsSL --retry 6 --retry-all-errors "$BASE/" | grep -oE 'apk-tools-static-[0-9][^"]*\.apk' | sort -V | tail -1)
+        curl -fsSL --retry 6 --retry-all-errors -o "$RUNNER_TEMP/pkg.apk" "$BASE/$FILE"
+        tar -xzf "$RUNNER_TEMP/pkg.apk" -C "$RUNNER_TEMP" sbin/apk.static
+        install -m755 "$RUNNER_TEMP/sbin/apk.static" "$RUNNER_TEMP/apk"
+        echo "APK_STATIC_SHA=$(sha256sum "$RUNNER_TEMP/apk" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
     - name: Setup Alpine Linux
       uses: jirutka/setup-alpine@v1
       with:
         arch: ${{ matrix.config.arch }}
         branch: ${{ matrix.config.branch }}
+        apk-tools-url: 'https://dl-cdn.alpinelinux.org/unused#!sha256!${{ env.APK_STATIC_SHA }}'
 
     - name: Install dependencies
       shell: alpine.sh --root {0}
