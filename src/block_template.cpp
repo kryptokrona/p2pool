@@ -461,6 +461,32 @@ void BlockTemplate::update(const MinerData& data, const Mempool& mempool, const 
 				final_weight += tx.weight - prev_tx.weight;
 			}
 		}
+
+		// The fee/byte selection above never picks zero-fee FUSION transactions (they add
+		// weight but no fee, so they can only lower the reward once we're in the penalty
+		// zone). Left alone, p2pool therefore mines them out entirely and a fusion flood
+		// just piles up in the mempool until the 24h TTL. Fusion txs are valid, consensus-
+		// includable zero-fee txs (each already validated <= FUSION_TX_MAX_SIZE on pool
+		// entry), so fill any leftover penalty-free-zone space with them here.
+		//
+		// We only add fusion while final_weight stays <= data.median_weight, so the block
+		// never enters the penalty zone: get_block_reward() returns base+fees for
+		// weight <= median, i.e. the miner's reward is completely unaffected, and the block
+		// stays far under maxBlockCumulativeSize. This mirrors the daemon's own
+		// Core::fillBlockTemplate (which includes fusion txs up to the median size). Fee-
+		// paying txs were selected first above, so they are never displaced by fusion.
+		for (int i : m_mempoolTxsOrder) {
+			const TxMempoolData& tx = m_mempoolTxs[i];
+			if (tx.fee != 0) {
+				continue; // only zero-fee fusion txs; fee-paying txs were already handled
+			}
+			if (final_weight + tx.weight > data.median_weight) {
+				continue; // keep the whole block inside the penalty-free zone
+			}
+			m_mempoolTxsOrder2.push_back(i);
+			final_weight += tx.weight; // final_fees unchanged (fee == 0)
+		}
+
 		m_mempoolTxsOrder = m_mempoolTxsOrder2;
 
 		final_fees = 0;
